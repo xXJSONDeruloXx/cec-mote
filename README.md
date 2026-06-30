@@ -1,99 +1,82 @@
-# Decky Plugin Template [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
+# mote
 
-Reference example for using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) in a [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin.
+`mote` is a minimal Decky Loader plugin that sends HDMI-CEC volume commands through the SteamOS `cecd` D-Bus service. It provides three controller-friendly actions in a Decky panel:
 
-### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates. currently documentation is split between this README and the wiki which is something we are hoping to rectify in the future.**  
+- `Volume Up`
+- `Volume Down`
+- `Mute`
 
-## Developers
+The plugin does not talk to the CEC adapter directly. It uses `cecd` as the sole controller and sends only the validated high-level D-Bus methods exposed by `com.steampowered.CecDaemon1.CecDevice1`.
 
-### Dependencies
+## Prerequisites
 
-This template relies on the user having Node.js v16.14+ and `pnpm` (v9) installed on their system.  
-Please make sure to install pnpm v9 to prevent issues with CI during plugin submission.  
-`pnpm` can be downloaded from `npm` itself which is recommended.
+- Decky Loader
+- SteamOS `cecd`
+- A functioning HDMI-CEC adapter on the system
+- HDMI-CEC enabled on the connected TV, AVR, or soundbar
 
-#### Linux
+The plugin does not install or configure CEC hardware and does not replace `cecd`.
 
-```bash
-sudo npm i -g pnpm@9
-```
+## Supported controls
 
-If you would like to build plugins that have their own custom backends, Docker is required as it is used by the Decky CLI tool.
+- `Volume Up`
+- `Volume Down`
+- `Mute`
 
-### Making your own plugin
+The plugin reads the current `AudioLogicalAddress` from `cecd` before each action. A TV usually appears as logical address `0`. An AVR or soundbar may appear as logical address `5`.
 
-1. You can fork this repo or utilize the "Use this template" button on Github.
-2. In your local fork/own plugin-repository run these commands:
-   1. ``pnpm i``
-   2. ``pnpm run build``
-   - These setup pnpm and build the frontend code for testing.
-3. Consult the [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) repository for ways to accomplish your tasks.
-   - Documentation and examples are still rough, 
-   - Decky loader primarily targets Steam Deck hardware so keep this in mind when developing your plugin.
-4. If using VSCodium/VSCode, run the `setup` and `build` and `deploy` tasks. If not using VSCodium etc. you can derive your own makefile or just manually utilize the scripts for these commands as you see fit.
+CEC behavior varies by manufacturer, so compatibility depends on the connected display or audio device.
 
-If you use VSCode or it's derivatives (we suggest [VSCodium](https://vscodium.com/)!) just run the `setup` and `build` tasks. It's really that simple.
+## Build requirements
 
-#### Other important information
+This plugin inherits the current official Decky plugin template toolchain:
 
-Everytime you change the frontend code (`index.tsx` etc) you will need to rebuild using the commands from step 2 above or the build task if you're using vscode or a derivative.
+- Node.js compatible with the template
+- `pnpm`
 
-Note: If you are receiving build errors due to an out of date library, you should run this command inside of your repository:
+## Local build
 
 ```bash
-pnpm update @decky/ui --latest
+pnpm install
+pnpm run build
 ```
 
-### Backend support
+## Local Decky development and install
 
-If you are developing with a backend for a plugin and would like to submit it to the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) you will need to have all backend code located in ``backend/src``, with backend being located in the root of your git repository.
-When building your plugin, the source code will be built and any finished binary or binaries will be output to ``backend/out`` (which is created during CI.)
-If your buildscript, makefile or any other build method does not place the binary files in the ``backend/out`` directory they will not be properly picked up during CI and your plugin will not have the required binaries included for distribution.
+1. Build the plugin locally with the commands above.
+2. Copy or symlink the repository into your Decky plugins directory on the target SteamOS system.
+3. Reload Decky Loader or restart the plugin from the Decky developer flow.
+4. Open the `mote` panel in Decky and confirm the status line identifies a reachable CEC device.
 
-Example:  
-In our makefile used to demonstrate the CI process of building and distributing a plugin backend, note that the makefile explicitly creates the `out` folder (``backend/out``) and then compiles the binary into that folder. Here's the relevant snippet.
+## Inspecting the installed CEC interface
 
-```make
-hello:
-	mkdir -p ./out
-	gcc -o ./out/hello ./src/main.c
+```bash
+busctl --user introspect \
+  com.steampowered.CecDaemon1 \
+  /com/steampowered/CecDaemon1/Devices/Cec0 \
+  com.steampowered.CecDaemon1.CecDevice1
 ```
 
-The CI does create the `out` folder itself but we recommend creating it yourself if possible during your build process to ensure the build process goes smoothly.
+## Troubleshooting
 
-Note: When locally building your plugin it will be placed into a folder called 'out' this is different from the concept described above.
+Check recent `cecd` logs:
 
-The out folder is not sent to the final plugin, but is then put into a ``bin`` folder which is found at the root of the plugin's directory.  
-More information on the bin folder can be found below in the distribution section below.
-
-### Distribution
-
-We recommend following the instructions found in the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) on how to get your plugin up on the plugin store. This is the best way to get your plugin in front of users.
-You can also choose to do distribution via a zip file containing the needed files, if that zip file is uploaded to a URL it can then be downloaded and installed via decky-loader.
-
-Layout of a plugin zip ready for distribution:
-```
-pluginname-v1.0.0.zip (version number is optional but recommended for users sake)
-   |
-   pluginname/ <directory>
-   |  |  |
-   |  |  bin/ <directory> (optional)
-   |  |     |
-   |  |     binary (optional)
-   |  |
-   |  dist/ <directory> [required]
-   |      |
-   |      index.js [required]
-   | 
-   package.json [required]
-   plugin.json [required]
-   main.py {required if you are using the python backend of decky-loader: serverAPI}
-   README.md (optional but recommended)
-   LICENSE(.md) [required, filename should be roughly similar, suffix not needed]
+```bash
+journalctl --user -u cecd.service -b --no-pager -n 100
 ```
 
-Note regarding licenses: Including a license is required for the plugin store if your chosen license requires the license to be included alongside usage of source-code/binaries!
+If `mote` reports that no CEC device is ready, verify:
 
-Standard procedure for licenses is to have your chosen license at the top of the file, and to leave the original license for the plugin-template at the bottom. If this is not the case on submission to the plugin database, you will be asked to fix this discrepancy.
+- `cecd` is running in the user session
+- the HDMI-CEC adapter is detected by SteamOS
+- HDMI-CEC is enabled on the TV, AVR, or soundbar
 
-We cannot and will not distribute your plugin on the Plugin Store if it's license requires it's inclusion but you have not included a license to be re-distributed with your plugin in the root of your git repository.
+## Scope
+
+`mote` does not:
+
+- install `cecd`
+- configure `/etc`
+- create udev rules or systemd units
+- replace `cecd`
+- depend on `steamos-cec-bt-wake`

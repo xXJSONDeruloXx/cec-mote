@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-CLI_LOCATION="$(pwd)/cli"
-echo "Building plugin in $(pwd)"
-printf "Please input sudo password to proceed.\n"
+set -euo pipefail
 
-# read -s sudopass
+ROOT_DIR="$(pwd)"
+CLI_LOCATION="${ROOT_DIR}/cli/decky"
 
-# printf "\n"
+if ! test -x "${CLI_LOCATION}"; then
+    echo "Decky CLI not found at ${CLI_LOCATION}. Run .vscode/setup.sh first."
+    exit 1
+fi
 
-echo $sudopass | sudo -E $CLI_LOCATION/decky plugin build $(pwd)
+echo "Building plugin in ${ROOT_DIR}"
+"${CLI_LOCATION}" plugin build "${ROOT_DIR}"

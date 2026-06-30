@@ -1,11 +1,10 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
-  "flags": ["debug", "_root"],
+  "name": "mote",
+  "author": "xXJSONDeruloXx",
+  "flags": [],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+    "tags": ["utility", "cec", "audio"],
+    "description": "A minimal HDMI-CEC volume remote for SteamOS."
   }
 }

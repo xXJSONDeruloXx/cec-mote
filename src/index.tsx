@@ -1,115 +1,173 @@
-import {
-  ButtonItem,
-  PanelSection,
-  PanelSectionRow,
-  Navigation,
-  staticClasses
-} from "@decky/ui";
-import {
-  addEventListener,
-  removeEventListener,
-  callable,
-  definePlugin,
-  toaster,
-  // routerHook
-} from "@decky/api"
-import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { ButtonItem, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { callable, definePlugin, toaster } from "@decky/api";
+import { type ReactNode, useEffect, useState } from "react";
+import { FaVolumeDown, FaVolumeMute, FaVolumeUp } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
+type ActionName = "volume_up" | "volume_down" | "mute";
 
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
+interface CecStatus {
+  ready: boolean;
+  active: boolean;
+  audioLogicalAddress: number | null;
+  targetLabel: string | null;
+  objectPath: string | null;
+  warning: string | null;
+  error: string | null;
+}
 
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+interface CecActionResult {
+  ok: boolean;
+  action: ActionName;
+  audioLogicalAddress?: number;
+  objectPath?: string;
+  error?: string;
+}
 
-function Content() {
-  const [result, setResult] = useState<number | undefined>();
+const getStatus = callable<[], CecStatus>("get_status");
+const volumeUp = callable<[], CecActionResult>("volume_up");
+const volumeDown = callable<[], CecActionResult>("volume_down");
+const mute = callable<[], CecActionResult>("mute");
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
-  };
-
-  return (
-    <PanelSection title="Panel Section">
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
-        </div>
-      </PanelSectionRow> */}
-
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
-    </PanelSection>
-  );
+const ACTIONS: Record<ActionName, () => Promise<CecActionResult>> = {
+  volume_up: volumeUp,
+  volume_down: volumeDown,
+  mute,
 };
 
-export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
+const ACTION_LABELS: Record<ActionName, ReactNode> = {
+  volume_up: (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+      <FaVolumeUp />
+      <span>Volume Up</span>
+    </span>
+  ),
+  volume_down: (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+      <FaVolumeDown />
+      <span>Volume Down</span>
+    </span>
+  ),
+  mute: (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+      <FaVolumeMute />
+      <span>Mute</span>
+    </span>
+  ),
+};
 
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
+function Content() {
+  const [status, setStatus] = useState<CecStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [pending, setPending] = useState<Record<ActionName, boolean>>({
+    volume_up: false,
+    volume_down: false,
+    mute: false,
   });
 
+  const loadStatus = async () => {
+    setStatusLoading(true);
+    try {
+      const nextStatus = await getStatus();
+      setStatus(nextStatus);
+    } catch (error) {
+      console.error("Failed to load mote status", error);
+      setStatus({
+        ready: false,
+        active: false,
+        audioLogicalAddress: null,
+        targetLabel: null,
+        objectPath: null,
+        warning: null,
+        error: "Unable to reach the backend",
+      });
+    } finally {
+      setStatusLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadStatus();
+  }, []);
+
+  const handleAction = async (action: ActionName) => {
+    setPending((current) => ({ ...current, [action]: true }));
+    try {
+      const result = await ACTIONS[action]();
+      if (!result.ok) {
+        toaster.toast({
+          title: "mote",
+          body: result.error ?? "CEC action failed",
+        });
+        await loadStatus();
+      }
+    } catch (error) {
+      console.error(`Failed to execute ${action}`, error);
+      toaster.toast({
+        title: "mote",
+        body: "Unable to reach the backend",
+      });
+      await loadStatus();
+    } finally {
+      setPending((current) => ({ ...current, [action]: false }));
+    }
+  };
+
+  const ready = status?.ready ?? false;
+  const statusLine = statusLoading
+    ? "Checking CEC status..."
+    : ready
+      ? `CEC ready${status?.targetLabel ? ` · ${status.targetLabel}` : ""}`
+      : status?.error ?? "CEC unavailable";
+
+  return (
+    <PanelSection title="mote">
+      <PanelSectionRow>
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px", width: "100%" }}>
+          <div>{statusLine}</div>
+          {status?.warning ? <div>{status.warning}</div> : null}
+          {!ready && !statusLoading ? (
+            <ButtonItem layout="below" onClick={() => void loadStatus()}>
+              Retry
+            </ButtonItem>
+          ) : null}
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={!ready || pending.volume_up}
+          onClick={() => void handleAction("volume_up")}
+        >
+          {ACTION_LABELS.volume_up}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={!ready || pending.volume_down}
+          onClick={() => void handleAction("volume_down")}
+        >
+          {ACTION_LABELS.volume_down}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={!ready || pending.mute}
+          onClick={() => void handleAction("mute")}
+        >
+          {ACTION_LABELS.mute}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
+export default definePlugin(() => {
   return {
-    // The name shown in various decky menus
-    name: "Test Plugin",
-    // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
-    // The content of your plugin's menu
+    name: "mote",
+    titleView: <div className={staticClasses.Title}>mote</div>,
     content: <Content />,
-    // The icon displayed in the plugin list
-    icon: <FaShip />,
-    // The function triggered when your plugin unloads
-    onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
-    },
+    icon: <FaVolumeUp />,
   };
 });
