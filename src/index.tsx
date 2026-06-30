@@ -138,7 +138,7 @@ function Content() {
       : status?.error ?? "CEC unavailable";
 
   return (
-    <PanelSection title="mote">
+    <PanelSection>
       <PanelSectionRow>
         <div style={{ display: "flex", flexDirection: "column", gap: "4px", width: "100%" }}>
           <div>{statusLine}</div>
