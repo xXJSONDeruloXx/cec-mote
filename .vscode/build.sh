@@ -11,3 +11,21 @@ fi
 
 echo "Building plugin in ${ROOT_DIR}"
 "${CLI_LOCATION}" plugin build "${ROOT_DIR}"
+
+if test -d "${ROOT_DIR}/assets"; then
+    echo "Adding bundled assets to out/mote.zip"
+    ROOT_DIR="${ROOT_DIR}" python - <<'PY'
+import os
+import zipfile
+from pathlib import Path
+
+root = Path(os.environ["ROOT_DIR"])
+zip_path = root / "out" / "mote.zip"
+assets_dir = root / "assets"
+
+with zipfile.ZipFile(zip_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+    for path in assets_dir.rglob("*"):
+        if path.is_file():
+            zf.write(path, Path("mote") / path.relative_to(root))
+PY
+fi

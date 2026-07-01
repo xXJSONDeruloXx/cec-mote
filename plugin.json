@@ -1,10 +1,10 @@
 {
   "name": "mote",
   "author": "xXJSONDeruloXx",
-  "flags": [],
+  "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["utility", "cec", "audio"],
+    "tags": ["utility", "cec", "audio", "root"],
     "description": "A minimal HDMI-CEC volume remote for SteamOS."
   }
 }

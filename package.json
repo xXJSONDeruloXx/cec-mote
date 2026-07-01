@@ -1,6 +1,6 @@
 {
   "name": "mote",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A minimal HDMI-CEC volume remote for SteamOS via Decky Loader.",
   "type": "module",
   "scripts": {

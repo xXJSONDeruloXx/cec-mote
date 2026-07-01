@@ -5,6 +5,7 @@ import os
 import pwd
 import shutil
 import time
+from typing import Any
 
 import decky
 
@@ -21,18 +22,26 @@ CEC_OBJECT_PATHS = [
 COMMAND_TIMEOUT_SECONDS = 3.0
 DISCOVERY_POLL_SECONDS = 2.0
 DISCOVERY_POLL_INTERVAL_SECONDS = 0.2
+SETUP_COMMAND_TIMEOUT_SECONDS = 90.0
+SETUP_SCRIPT_RELATIVE_PATH = os.path.join("assets", "steamos-cec-bt-wake.sh")
 
 
 class SessionContext:
     def __init__(
         self,
         *,
+        username: str,
         busctl_path: str,
         systemctl_path: str | None,
+        runuser_path: str | None,
+        env_path: str | None,
         env: dict[str, str],
     ) -> None:
+        self.username = username
         self.busctl_path = busctl_path
         self.systemctl_path = systemctl_path
+        self.runuser_path = runuser_path
+        self.env_path = env_path
         self.env = env
 
 
@@ -113,6 +122,15 @@ class Plugin:
 
     async def mute(self) -> dict:
         return await self._perform_action("mute")
+
+    async def get_sleep_wake_status(self) -> dict:
+        return await self._run_setup_mode("verify")
+
+    async def install_sleep_wake(self) -> dict:
+        return await self._run_setup_mode("install")
+
+    async def uninstall_sleep_wake(self) -> dict:
+        return await self._run_setup_mode("uninstall")
 
     def _ensure_action_lock(self) -> asyncio.Lock:
         if self._action_lock is None:
@@ -201,7 +219,7 @@ class Plugin:
         if not busctl_path:
             raise CecError("busctl not found")
 
-        username = os.environ.get("DECKY_USER")
+        username = os.environ.get("DECKY_USER") or getattr(decky, "DECKY_USER", None)
         if username:
             try:
                 user_entry = pwd.getpwnam(username)
@@ -219,22 +237,7 @@ class Plugin:
         if not os.path.exists(bus_path):
             raise CecError("User session bus unavailable")
 
-        env = os.environ.copy()
-        for key in (
-            "LD_LIBRARY_PATH",
-            "PYTHONHOME",
-            "PYTHONPATH",
-            "PYTHONEXECUTABLE",
-            "PYINSTALLER_SAFE_PATH",
-            "PYINSTALLER_RESET_ENVIRONMENT",
-            "_MEIPASS2",
-            "_PYI_APPLICATION_HOME_DIR",
-            "_PYI_ARCHIVE_FILE",
-            "_PYI_PARENT_PROCESS_LEVEL",
-            "_PYI_LINUX_PROCESS_NAME",
-        ):
-            env.pop(key, None)
-
+        env = self._sanitized_env()
         env.update(
             {
                 "HOME": user_entry.pw_dir,
@@ -247,8 +250,11 @@ class Plugin:
         )
 
         return SessionContext(
+            username=username,
             busctl_path=busctl_path,
             systemctl_path=shutil.which("systemctl"),
+            runuser_path=shutil.which("runuser"),
+            env_path=shutil.which("env"),
             env=env,
         )
 
@@ -276,14 +282,14 @@ class Plugin:
 
             decky.logger.info("Attempting to start cecd.service for discovery")
             try:
-                await self._run_command(
+                await self._run_session_command(
+                    session,
                     (
                         session.systemctl_path,
                         "--user",
                         "start",
                         "cecd.service",
                     ),
-                    env=session.env,
                     error_message="cecd service unavailable",
                 )
             except CecError as start_exc:
@@ -361,7 +367,8 @@ class Plugin:
         *,
         error_message: str,
     ) -> str:
-        result = await self._run_command(
+        result = await self._run_session_command(
+            session,
             (
                 session.busctl_path,
                 "--user",
@@ -371,7 +378,6 @@ class Plugin:
                 DEVICE_INTERFACE,
                 property_name,
             ),
-            env=session.env,
             error_message=error_message,
         )
         return result.stdout
@@ -383,7 +389,8 @@ class Plugin:
         method_name: str,
         audio_logical_address: int,
     ) -> None:
-        await self._run_command(
+        await self._run_session_command(
+            session,
             (
                 session.busctl_path,
                 "--user",
@@ -395,9 +402,212 @@ class Plugin:
                 "y",
                 str(audio_logical_address),
             ),
-            env=session.env,
             error_message="D-Bus method failure or CEC transmission error",
         )
+
+    async def _run_setup_mode(self, mode: str) -> dict[str, Any]:
+        lock = self._ensure_action_lock()
+        async with lock:
+            script_path = self._get_setup_script_path()
+            args = (self._get_bash_path(), script_path, f"--{mode}")
+            if mode == "install":
+                args = (*args, "--yes")
+
+            result = await self._run_command(
+                args,
+                env=self._setup_env(),
+                error_message=f"Setup script failed during {mode}",
+                timeout_seconds=SETUP_COMMAND_TIMEOUT_SECONDS,
+                check_returncode=False,
+            )
+            return self._parse_setup_result(mode, result)
+
+    async def _run_session_command(
+        self,
+        session: SessionContext,
+        args: tuple[str, ...],
+        *,
+        error_message: str,
+    ) -> CommandResult:
+        effective_args = args
+        effective_env = session.env
+
+        if os.geteuid() == 0 and session.username != "root":
+            if not session.runuser_path or not session.env_path:
+                raise CecError("runuser not found")
+            env_pairs = tuple(f"{key}={value}" for key, value in session.env.items())
+            effective_args = (
+                session.runuser_path,
+                "-u",
+                session.username,
+                "--",
+                session.env_path,
+                *env_pairs,
+                *args,
+            )
+            effective_env = self._sanitized_env()
+            effective_env.setdefault("LC_ALL", "C")
+
+        return await self._run_command(
+            effective_args,
+            env=effective_env,
+            error_message=error_message,
+        )
+
+    def _get_bash_path(self) -> str:
+        bash_path = shutil.which("bash")
+        if not bash_path:
+            raise CecError("bash not found")
+        return bash_path
+
+    def _get_setup_script_path(self) -> str:
+        plugin_dir = getattr(decky, "DECKY_PLUGIN_DIR", None)
+        if not plugin_dir:
+            raise CecError("Decky plugin directory unavailable")
+        script_path = os.path.join(plugin_dir, SETUP_SCRIPT_RELATIVE_PATH)
+        if not os.path.exists(script_path):
+            raise CecError("Bundled sleep/wake setup script is missing")
+        return script_path
+
+    def _setup_env(self) -> dict[str, str]:
+        env = self._sanitized_env()
+        env.setdefault("LC_ALL", "C")
+        return env
+
+    @staticmethod
+    def _sanitized_env() -> dict[str, str]:
+        env = os.environ.copy()
+        for key in (
+            "LD_LIBRARY_PATH",
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "PYINSTALLER_SAFE_PATH",
+            "PYINSTALLER_RESET_ENVIRONMENT",
+            "_MEIPASS2",
+            "_PYI_APPLICATION_HOME_DIR",
+            "_PYI_ARCHIVE_FILE",
+            "_PYI_PARENT_PROCESS_LEVEL",
+            "_PYI_LINUX_PROCESS_NAME",
+        ):
+            env.pop(key, None)
+        return env
+
+    def _parse_setup_result(self, mode: str, result: CommandResult) -> dict[str, Any]:
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        combined_output = "\n".join(
+            part for part in (stdout, stderr) if part
+        ).strip()
+        lines = [line.strip() for line in combined_output.splitlines() if line.strip()]
+
+        ok_lines = [line for line in lines if line.startswith("OK")]
+        warn_lines = [line for line in lines if line.startswith("WARN") or line.startswith("Warning:")]
+        fail_lines = [line for line in lines if line.startswith("FAIL") or line.startswith("Error:")]
+
+        state = self._classify_setup_state(result.returncode, ok_lines, fail_lines, warn_lines)
+        summary = self._summarize_setup_state(mode, state, result.returncode, lines)
+
+        details = {
+            "stateFile": self._extract_value(lines, "State file loaded:"),
+            "cecPhysicalAddress": self._extract_value(lines, "Stored CEC physical address:"),
+            "cecDevice": self._extract_value(lines, "Stored CEC device:"),
+            "cecObjectPath": self._extract_value(lines, "CEC D-Bus path:"),
+            "bluetoothTarget": self._extract_value(
+                lines, "Configured Bluetooth wake target:"
+            )
+            or self._extract_value(lines, "Stored Bluetooth wake target:"),
+            "bluetoothHelper": self._extract_value(lines, "bt-wakeup helper path:"),
+            "keepListPath": self._extract_value(lines, "Atomic-update keep-list exists:"),
+            "persistentLayout": self._extract_value(lines, "Persistent layout:"),
+        }
+
+        return {
+            "ok": result.returncode == 0,
+            "action": mode,
+            "state": state,
+            "summary": summary,
+            "warnings": warn_lines,
+            "failures": fail_lines,
+            "details": details,
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": result.returncode,
+        }
+
+    def _classify_setup_state(
+        self,
+        returncode: int,
+        ok_lines: list[str],
+        fail_lines: list[str],
+        warn_lines: list[str],
+    ) -> str:
+        if returncode == 0:
+            return "configured"
+
+        combined = "\n".join([*ok_lines, *warn_lines, *fail_lines])
+        if "Recoverable partial-install damage" in combined:
+            return "needs_repair"
+        if "State file loaded:" in combined:
+            return "needs_repair"
+        if any(
+            token in combined
+            for token in (
+                "not enabled",
+                "wakeup is",
+                "Could not read",
+                "does not match",
+                "legacy state path",
+            )
+        ):
+            return "needs_repair"
+        if any(
+            token in combined
+            for token in (
+                "Persistent data directory missing",
+                "CEC helper missing",
+                "Bluetooth helper missing",
+                "Atomic-update keep-list missing",
+                "State file missing",
+                "unit missing",
+            )
+        ) and not ok_lines:
+            return "needs_setup"
+        if fail_lines:
+            return "needs_repair"
+        return "error"
+
+    def _summarize_setup_state(
+        self,
+        mode: str,
+        state: str,
+        returncode: int,
+        lines: list[str],
+    ) -> str:
+        if mode == "install":
+            if returncode == 0:
+                return "Sleep/wake setup is installed and verified."
+            return "Sleep/wake setup install reported problems."
+        if mode == "uninstall":
+            if returncode == 0:
+                return "Sleep/wake setup removed."
+            return "Sleep/wake setup uninstall reported problems."
+        if state == "configured":
+            return "Sleep/wake setup is installed and healthy."
+        if state == "needs_setup":
+            return "Sleep/wake setup is not installed yet."
+        if state == "needs_repair":
+            return "Sleep/wake setup exists but needs repair."
+        if lines:
+            return lines[-1]
+        return "Sleep/wake setup status is unavailable."
+
+    @staticmethod
+    def _extract_value(lines: list[str], prefix: str) -> str | None:
+        for line in lines:
+            if prefix in line:
+                return line.split(prefix, 1)[1].strip()
+        return None
 
     async def _run_command(
         self,
@@ -405,6 +615,8 @@ class Plugin:
         *,
         env: dict[str, str],
         error_message: str,
+        timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
+        check_returncode: bool = True,
     ) -> CommandResult:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -415,7 +627,7 @@ class Plugin:
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 process.communicate(),
-                timeout=COMMAND_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
             decky.logger.error("Command timed out: %s", list(args))
@@ -425,12 +637,13 @@ class Plugin:
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-            raise CecError("D-Bus call timeout") from exc
+            timeout_message = "D-Bus call timeout" if timeout_seconds == COMMAND_TIMEOUT_SECONDS else "Command timeout"
+            raise CecError(timeout_message) from exc
 
         stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
 
-        if process.returncode != 0:
+        if process.returncode != 0 and check_returncode:
             decky.logger.error(
                 "Command failed rc=%s args=%s stdout=%r stderr=%r",
                 process.returncode,

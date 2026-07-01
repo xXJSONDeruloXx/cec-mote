@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -19,7 +21,15 @@ class _Logger:
         pass
 
 
-sys.modules.setdefault("decky", types.SimpleNamespace(logger=_Logger()))
+tmp_plugin_dir = tempfile.mkdtemp(prefix="mote-plugin-")
+os.makedirs(os.path.join(tmp_plugin_dir, "assets"), exist_ok=True)
+with open(os.path.join(tmp_plugin_dir, "assets", "steamos-cec-bt-wake.sh"), "w", encoding="utf-8") as handle:
+    handle.write("#!/usr/bin/env bash\n")
+
+sys.modules.setdefault(
+    "decky",
+    types.SimpleNamespace(logger=_Logger(), DECKY_PLUGIN_DIR=tmp_plugin_dir),
+)
 mote_main = importlib.import_module("main")
 
 
@@ -70,6 +80,101 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(mote_main.CecError, "Invalid audio logical address"):
             self.plugin._parse_audio_logical_address("y 15")
 
+    def test_parse_setup_result_configured(self):
+        result = mote_main.CommandResult(
+            args=tuple(),
+            returncode=0,
+            stdout="\n".join(
+                [
+                    "Layout",
+                    "------",
+                    "OK   Persistent data directory exists: /var/lib/steamos-cec-bt-wake",
+                    "CEC",
+                    "---",
+                    "OK   State file loaded: /var/lib/steamos-cec-bt-wake/state.conf",
+                    "OK   Stored CEC physical address: 3.0.0.0",
+                    "Bluetooth wake",
+                    "--------------",
+                    "OK   Configured Bluetooth wake target: 13d3:3558",
+                    "SteamOS atomic updates",
+                    "----------------------",
+                    "OK   Atomic-update keep-list exists: /etc/atomic-update.conf.d/steamos-cec-bt-wake.conf",
+                    "Verification passed.",
+                ]
+            ),
+            stderr="",
+        )
+
+        parsed = self.plugin._parse_setup_result("verify", result)
+
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["state"], "configured")
+        self.assertEqual(parsed["details"]["bluetoothTarget"], "13d3:3558")
+        self.assertEqual(
+            parsed["details"]["keepListPath"],
+            "/etc/atomic-update.conf.d/steamos-cec-bt-wake.conf",
+        )
+
+    def test_parse_setup_result_needs_setup(self):
+        result = mote_main.CommandResult(
+            args=tuple(),
+            returncode=1,
+            stdout="\n".join(
+                [
+                    "Layout",
+                    "------",
+                    "FAIL Persistent data directory missing: /var/lib/steamos-cec-bt-wake",
+                    "FAIL CEC helper missing: /var/lib/steamos-cec-bt-wake/cec-control",
+                    "FAIL Bluetooth helper missing: /var/lib/steamos-cec-bt-wake/enable-bluetooth-wakeup",
+                    "CEC",
+                    "---",
+                    "WARN State file missing from /var/lib/steamos-cec-bt-wake/state.conf and /etc/steamos-cec-bt-wake.conf",
+                    "FAIL cec-sleep.service unit missing: /etc/systemd/system/cec-sleep.service",
+                    "SteamOS atomic updates",
+                    "----------------------",
+                    "FAIL Atomic-update keep-list missing: /etc/atomic-update.conf.d/steamos-cec-bt-wake.conf",
+                    "Verification found 8 problem(s).",
+                ]
+            ),
+            stderr="",
+        )
+
+        parsed = self.plugin._parse_setup_result("verify", result)
+
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["state"], "needs_setup")
+        self.assertEqual(parsed["summary"], "Sleep/wake setup is not installed yet.")
+
+    def test_parse_setup_result_needs_repair(self):
+        result = mote_main.CommandResult(
+            args=tuple(),
+            returncode=1,
+            stdout="\n".join(
+                [
+                    "Layout",
+                    "------",
+                    "OK   Persistent data directory exists: /var/lib/steamos-cec-bt-wake",
+                    "CEC",
+                    "---",
+                    "OK   State file loaded: /var/lib/steamos-cec-bt-wake/state.conf",
+                    "FAIL cec-wake.service not enabled",
+                    "WARN Recoverable partial-install damage detected: project files exist but the state file is missing.",
+                    "Verification found 1 problem(s).",
+                ]
+            ),
+            stderr="",
+        )
+
+        parsed = self.plugin._parse_setup_result("verify", result)
+
+        self.assertEqual(parsed["state"], "needs_repair")
+        self.assertEqual(parsed["summary"], "Sleep/wake setup exists but needs repair.")
+
+    def test_get_setup_script_path_uses_bundled_asset(self):
+        script_path = self.plugin._get_setup_script_path()
+        self.assertTrue(script_path.endswith("assets/steamos-cec-bt-wake.sh"))
+        self.assertTrue(os.path.exists(script_path))
+
     async def test_volume_up_maps_to_volume_up_method(self):
         await self._assert_action_mapping("volume_up", "VolumeUp")
 
@@ -81,8 +186,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_call_cec_method_uses_signature_and_dynamic_address(self):
         session = mote_main.SessionContext(
+            username="deck",
             busctl_path="/usr/bin/busctl",
             systemctl_path=None,
+            runuser_path="/usr/sbin/runuser",
+            env_path="/usr/bin/env",
             env={"LC_ALL": "C"},
         )
         self.plugin._run_command = AsyncMock(
@@ -119,8 +227,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_device_discovery_prefers_active_object(self):
         session = mote_main.SessionContext(
+            username="deck",
             busctl_path="/usr/bin/busctl",
             systemctl_path=None,
+            runuser_path="/usr/sbin/runuser",
+            env_path="/usr/bin/env",
             env={"LC_ALL": "C"},
         )
 
@@ -144,8 +255,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_cached_object_is_invalidated_and_rediscovered(self):
         session = mote_main.SessionContext(
+            username="deck",
             busctl_path="/usr/bin/busctl",
             systemctl_path=None,
+            runuser_path="/usr/sbin/runuser",
+            env_path="/usr/bin/env",
             env={"LC_ALL": "C"},
         )
         self.plugin._cached_object_path = "/com/steampowered/CecDaemon1/Devices/Cec0"
@@ -171,21 +285,22 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["objectPath"], "/com/steampowered/CecDaemon1/Devices/Cec1")
-        self.assertEqual(self.plugin._cached_object_path, "/com/steampowered/CecDaemon1/Devices/Cec1")
+        self.assertEqual(
+            self.plugin._cached_object_path,
+            "/com/steampowered/CecDaemon1/Devices/Cec1",
+        )
         self.plugin._discover_device.assert_awaited_once()
 
     async def test_run_command_returns_controlled_timeout(self):
         process = SlowProcess()
 
-        with patch("main.asyncio.create_subprocess_exec", AsyncMock(return_value=process)), patch(
-            "main.COMMAND_TIMEOUT_SECONDS",
-            0.01,
-        ):
-            with self.assertRaisesRegex(mote_main.CecError, "D-Bus call timeout"):
+        with patch("main.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+            with self.assertRaisesRegex(mote_main.CecError, "Command timeout"):
                 await self.plugin._run_command(
                     ("/usr/bin/busctl", "--user"),
                     env={"LC_ALL": "C"},
                     error_message="ignored",
+                    timeout_seconds=0.01,
                 )
 
         self.assertTrue(process.terminated)
@@ -212,8 +327,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def _assert_action_mapping(self, action_name: str, expected_method: str):
         session = mote_main.SessionContext(
+            username="deck",
             busctl_path="/usr/bin/busctl",
             systemctl_path=None,
+            runuser_path="/usr/sbin/runuser",
+            env_path="/usr/bin/env",
             env={"LC_ALL": "C"},
         )
         self.plugin._get_session_context = Mock(return_value=session)
