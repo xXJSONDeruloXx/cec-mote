@@ -13,6 +13,7 @@ import { FaWrench } from "react-icons/fa";
 type ActionName = "volume_up" | "volume_down" | "mute";
 type SetupAction = "verify" | "install" | "uninstall";
 type SetupState = "configured" | "needs_setup" | "needs_repair" | "error";
+type SetupComponent = "cec" | "bluetooth";
 
 interface CecStatus {
   ready: boolean;
@@ -32,7 +33,7 @@ interface CecActionResult {
   error?: string;
 }
 
-interface SleepWakeDetails {
+interface SetupDetails {
   stateFile: string | null;
   cecPhysicalAddress: string | null;
   cecDevice: string | null;
@@ -43,14 +44,15 @@ interface SleepWakeDetails {
   persistentLayout: string | null;
 }
 
-interface SleepWakeStatus {
+interface SetupStatus {
   ok: boolean;
   action: SetupAction;
+  component: SetupComponent;
   state: SetupState;
   summary: string;
   warnings: string[];
   failures: string[];
-  details: SleepWakeDetails;
+  details: SetupDetails;
   stdout: string;
   stderr: string;
   returncode: number;
@@ -60,9 +62,12 @@ const getStatus = callable<[], CecStatus>("get_status");
 const volumeUp = callable<[], CecActionResult>("volume_up");
 const volumeDown = callable<[], CecActionResult>("volume_down");
 const mute = callable<[], CecActionResult>("mute");
-const getSleepWakeStatus = callable<[], SleepWakeStatus>("get_sleep_wake_status");
-const installSleepWake = callable<[], SleepWakeStatus>("install_sleep_wake");
-const uninstallSleepWake = callable<[], SleepWakeStatus>("uninstall_sleep_wake");
+const getCecSetupStatus = callable<[], SetupStatus>("get_cec_setup_status");
+const installCecSetup = callable<[], SetupStatus>("install_cec_setup");
+const uninstallCecSetup = callable<[], SetupStatus>("uninstall_cec_setup");
+const getBluetoothSetupStatus = callable<[], SetupStatus>("get_bluetooth_setup_status");
+const installBluetoothSetup = callable<[], SetupStatus>("install_bluetooth_setup");
+const uninstallBluetoothSetup = callable<[], SetupStatus>("uninstall_bluetooth_setup");
 
 const ACTIONS: Record<ActionName, () => Promise<CecActionResult>> = {
   volume_up: volumeUp,
@@ -70,9 +75,20 @@ const ACTIONS: Record<ActionName, () => Promise<CecActionResult>> = {
   mute,
 };
 
-const SETUP_ACTIONS: Record<Exclude<SetupAction, "verify">, () => Promise<SleepWakeStatus>> = {
-  install: installSleepWake,
-  uninstall: uninstallSleepWake,
+const SETUP_STATUS_CALLS: Record<SetupComponent, () => Promise<SetupStatus>> = {
+  cec: getCecSetupStatus,
+  bluetooth: getBluetoothSetupStatus,
+};
+
+const SETUP_ACTIONS: Record<SetupComponent, Record<Exclude<SetupAction, "verify">, () => Promise<SetupStatus>>> = {
+  cec: {
+    install: installCecSetup,
+    uninstall: uninstallCecSetup,
+  },
+  bluetooth: {
+    install: installBluetoothSetup,
+    uninstall: uninstallBluetoothSetup,
+  },
 };
 
 const RPC_TIMEOUT_MS = 5000;
@@ -100,6 +116,11 @@ const ACTION_LABELS: Record<ActionName, string> = {
   mute: "Mute",
 };
 
+const COMPONENT_LABELS: Record<SetupComponent, string> = {
+  cec: "CEC Sleep / Wake",
+  bluetooth: "Bluetooth Wake",
+};
+
 function setupStateLabel(state: SetupState): string {
   switch (state) {
     case "configured":
@@ -113,16 +134,11 @@ function setupStateLabel(state: SetupState): string {
   }
 }
 
-function setupPrimaryActionLabel(status: SleepWakeStatus | null): string {
+function setupPrimaryActionLabel(status: SetupStatus | null): string {
   if (!status) {
     return "Set Up";
   }
-  switch (status.state) {
-    case "configured":
-      return "Reinstall";
-    default:
-      return "Set Up";
-  }
+  return status.state === "configured" ? "Reinstall" : "Set Up";
 }
 
 function shouldDisplaySetupWarning(warning: string): boolean {
@@ -132,17 +148,156 @@ function shouldDisplaySetupWarning(warning: string): boolean {
   ].some((hiddenWarning) => warning.includes(hiddenWarning));
 }
 
+function createBackendFailureStatus(component: SetupComponent): SetupStatus {
+  return {
+    ok: false,
+    action: "verify",
+    component,
+    state: "error",
+    summary: "Unable to reach the setup backend.",
+    warnings: [],
+    failures: ["Backend request failed"],
+    details: {
+      stateFile: null,
+      cecPhysicalAddress: null,
+      cecDevice: null,
+      cecObjectPath: null,
+      bluetoothTarget: null,
+      bluetoothHelper: null,
+      keepListPath: null,
+      persistentLayout: null,
+    },
+    stdout: "",
+    stderr: "",
+    returncode: 1,
+  };
+}
+
+function SetupSection({
+  title,
+  status,
+  loading,
+  pending,
+  onInstall,
+  onRefresh,
+  onUninstall,
+}: {
+  title: string;
+  status: SetupStatus | null;
+  loading: boolean;
+  pending: SetupAction | null;
+  onInstall: () => void;
+  onRefresh: () => void;
+  onUninstall: () => void;
+}) {
+  const statusLabel = loading
+    ? `Checking ${title.toLowerCase()}...`
+    : status
+      ? setupStateLabel(status.state)
+      : "Status unavailable";
+
+  const visibleWarnings = status?.warnings.filter(shouldDisplaySetupWarning) ?? [];
+
+  return (
+    <PanelSection title={title}>
+      <PanelSectionRow>
+        <Field
+          focusable
+          highlightOnFocus
+          label="Setup status"
+          description={status?.summary ?? `Install or repair ${title.toLowerCase()}.`}
+        >
+          {loading ? <Spinner /> : statusLabel}
+        </Field>
+      </PanelSectionRow>
+
+      {status?.details.persistentLayout && title === COMPONENT_LABELS.cec ? (
+        <PanelSectionRow>
+          <Field focusable highlightOnFocus label="Persistent layout">
+            {status.details.persistentLayout}
+          </Field>
+        </PanelSectionRow>
+      ) : null}
+
+      {status?.details.cecDevice ? (
+        <PanelSectionRow>
+          <Field focusable highlightOnFocus label="CEC device">
+            {status.details.cecDevice}
+          </Field>
+        </PanelSectionRow>
+      ) : null}
+
+      {status?.details.cecPhysicalAddress ? (
+        <PanelSectionRow>
+          <Field focusable highlightOnFocus label="CEC physical address">
+            {status.details.cecPhysicalAddress}
+          </Field>
+        </PanelSectionRow>
+      ) : null}
+
+      {status?.details.bluetoothTarget ? (
+        <PanelSectionRow>
+          <Field focusable highlightOnFocus label="Bluetooth wake target">
+            {status.details.bluetoothTarget}
+          </Field>
+        </PanelSectionRow>
+      ) : null}
+
+      {visibleWarnings.slice(0, 3).map((warning) => (
+        <PanelSectionRow key={warning}>
+          <Field focusable highlightOnFocus label="Warning" description={warning} />
+        </PanelSectionRow>
+      ))}
+
+      {status?.failures.slice(0, 3).map((failure) => (
+        <PanelSectionRow key={failure}>
+          <Field focusable highlightOnFocus label="Issue" description={failure} />
+        </PanelSectionRow>
+      ))}
+
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={pending !== null} onClick={onInstall}>
+          {pending === "install" ? "Working..." : setupPrimaryActionLabel(status)}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={pending !== null} onClick={onRefresh}>
+          Refresh Setup Status
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={pending !== null || status?.state === "needs_setup"}
+          onClick={onUninstall}
+        >
+          {pending === "uninstall" ? "Working..." : "Uninstall Setup"}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
 function Content() {
   const [status, setStatus] = useState<CecStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
-  const [setupStatus, setSetupStatus] = useState<SleepWakeStatus | null>(null);
-  const [setupLoading, setSetupLoading] = useState(true);
+  const [setupStatus, setSetupStatus] = useState<Record<SetupComponent, SetupStatus | null>>({
+    cec: null,
+    bluetooth: null,
+  });
+  const [setupLoading, setSetupLoading] = useState<Record<SetupComponent, boolean>>({
+    cec: true,
+    bluetooth: true,
+  });
   const [pending, setPending] = useState<Record<ActionName, boolean>>({
     volume_up: false,
     volume_down: false,
     mute: false,
   });
-  const [setupPending, setSetupPending] = useState<SetupAction | null>(null);
+  const [setupPending, setSetupPending] = useState<Record<SetupComponent, SetupAction | null>>({
+    cec: null,
+    bluetooth: null,
+  });
 
   const loadStatus = async () => {
     setStatusLoading(true);
@@ -165,46 +320,30 @@ function Content() {
     }
   };
 
-  const loadSleepWakeStatus = async () => {
-    setSetupLoading(true);
+  const loadSetupStatus = async (component: SetupComponent) => {
+    setSetupLoading((current) => ({ ...current, [component]: true }));
     try {
       const nextStatus = await withTimeout(
-        getSleepWakeStatus(),
-        "Timed out while checking sleep/wake setup",
+        SETUP_STATUS_CALLS[component](),
+        `Timed out while checking ${component} setup`,
         SETUP_TIMEOUT_MS,
       );
-      setSetupStatus(nextStatus);
+      setSetupStatus((current) => ({ ...current, [component]: nextStatus }));
     } catch (error) {
-      console.error("Failed to load sleep/wake setup status", error);
-      setSetupStatus({
-        ok: false,
-        action: "verify",
-        state: "error",
-        summary: "Unable to reach the setup backend.",
-        warnings: [],
-        failures: ["Backend request failed"],
-        details: {
-          stateFile: null,
-          cecPhysicalAddress: null,
-          cecDevice: null,
-          cecObjectPath: null,
-          bluetoothTarget: null,
-          bluetoothHelper: null,
-          keepListPath: null,
-          persistentLayout: null,
-        },
-        stdout: "",
-        stderr: "",
-        returncode: 1,
-      });
+      console.error(`Failed to load ${component} setup status`, error);
+      setSetupStatus((current) => ({
+        ...current,
+        [component]: createBackendFailureStatus(component),
+      }));
     } finally {
-      setSetupLoading(false);
+      setSetupLoading((current) => ({ ...current, [component]: false }));
     }
   };
 
   useEffect(() => {
     void loadStatus();
-    void loadSleepWakeStatus();
+    void loadSetupStatus("cec");
+    void loadSetupStatus("bluetooth");
   }, []);
 
   const handleAction = async (action: ActionName) => {
@@ -230,40 +369,35 @@ function Content() {
     }
   };
 
-  const handleSetupAction = async (action: Exclude<SetupAction, "verify">) => {
-    setSetupPending(action);
+  const handleSetupAction = async (
+    component: SetupComponent,
+    action: Exclude<SetupAction, "verify">,
+  ) => {
+    setSetupPending((current) => ({ ...current, [component]: action }));
     try {
       const result = await withTimeout(
-        SETUP_ACTIONS[action](),
-        `Timed out while running ${action}`,
+        SETUP_ACTIONS[component][action](),
+        `Timed out while running ${action} for ${component}`,
         SETUP_TIMEOUT_MS,
       );
-      setSetupStatus(result);
+      setSetupStatus((current) => ({ ...current, [component]: result }));
       toaster.toast({
         title: "cec-mote",
         body: result.summary,
       });
     } catch (error) {
-      console.error(`Failed to execute ${action}`, error);
+      console.error(`Failed to execute ${action} for ${component}`, error);
       toaster.toast({
         title: "cec-mote",
         body: "Unable to reach the setup backend",
       });
     } finally {
-      setSetupPending(null);
-      await loadSleepWakeStatus();
+      setSetupPending((current) => ({ ...current, [component]: null }));
+      await loadSetupStatus(component);
     }
   };
 
   const ready = status?.ready ?? false;
-
-  const setupStatusLabel = setupLoading
-    ? "Checking sleep/wake setup..."
-    : setupStatus
-      ? setupStateLabel(setupStatus.state)
-      : "Status unavailable";
-
-  const visibleSetupWarnings = setupStatus?.warnings.filter(shouldDisplaySetupWarning) ?? [];
 
   return (
     <>
@@ -304,90 +438,25 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Sleep / wake setup">
-        <PanelSectionRow>
-          <Field
-            focusable
-            highlightOnFocus
-            label="Setup status"
-            description={setupStatus?.summary ?? "Install or repair CEC TV sleep/wake and Bluetooth wake support."}
-          >
-            {setupLoading ? <Spinner /> : setupStatusLabel}
-          </Field>
-        </PanelSectionRow>
+      <SetupSection
+        title={COMPONENT_LABELS.cec}
+        status={setupStatus.cec}
+        loading={setupLoading.cec}
+        pending={setupPending.cec}
+        onInstall={() => void handleSetupAction("cec", "install")}
+        onRefresh={() => void loadSetupStatus("cec")}
+        onUninstall={() => void handleSetupAction("cec", "uninstall")}
+      />
 
-        {setupStatus?.details.persistentLayout ? (
-          <PanelSectionRow>
-            <Field focusable highlightOnFocus label="Persistent layout">
-              {setupStatus.details.persistentLayout}
-            </Field>
-          </PanelSectionRow>
-        ) : null}
-
-        {setupStatus?.details.cecDevice ? (
-          <PanelSectionRow>
-            <Field focusable highlightOnFocus label="CEC device">
-              {setupStatus.details.cecDevice}
-            </Field>
-          </PanelSectionRow>
-        ) : null}
-
-        {setupStatus?.details.cecPhysicalAddress ? (
-          <PanelSectionRow>
-            <Field focusable highlightOnFocus label="CEC physical address">
-              {setupStatus.details.cecPhysicalAddress}
-            </Field>
-          </PanelSectionRow>
-        ) : null}
-
-        {setupStatus?.details.bluetoothTarget ? (
-          <PanelSectionRow>
-            <Field focusable highlightOnFocus label="Bluetooth wake target">
-              {setupStatus.details.bluetoothTarget}
-            </Field>
-          </PanelSectionRow>
-        ) : null}
-
-        {visibleSetupWarnings.slice(0, 3).map((warning) => (
-          <PanelSectionRow key={warning}>
-            <Field focusable highlightOnFocus label="Warning" description={warning} />
-          </PanelSectionRow>
-        ))}
-
-        {setupStatus?.failures.slice(0, 3).map((failure) => (
-          <PanelSectionRow key={failure}>
-            <Field focusable highlightOnFocus label="Issue" description={failure} />
-          </PanelSectionRow>
-        ))}
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={setupPending !== null}
-            onClick={() => void handleSetupAction("install")}
-          >
-            {setupPending === "install" ? "Working..." : setupPrimaryActionLabel(setupStatus)}
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={setupPending !== null}
-            onClick={() => void loadSleepWakeStatus()}
-          >
-            {setupPending === "verify" ? "Working..." : "Refresh Setup Status"}
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={setupPending !== null || setupStatus?.state === "needs_setup"}
-            onClick={() => void handleSetupAction("uninstall")}
-          >
-            {setupPending === "uninstall" ? "Working..." : "Uninstall Setup"}
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
+      <SetupSection
+        title={COMPONENT_LABELS.bluetooth}
+        status={setupStatus.bluetooth}
+        loading={setupLoading.bluetooth}
+        pending={setupPending.bluetooth}
+        onInstall={() => void handleSetupAction("bluetooth", "install")}
+        onRefresh={() => void loadSetupStatus("bluetooth")}
+        onUninstall={() => void handleSetupAction("bluetooth", "uninstall")}
+      />
     </>
   );
 }

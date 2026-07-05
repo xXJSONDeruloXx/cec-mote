@@ -105,9 +105,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             stderr="",
         )
 
-        parsed = self.plugin._parse_setup_result("verify", result)
+        parsed = self.plugin._parse_setup_result("verify", "bluetooth", result)
 
         self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["component"], "bluetooth")
         self.assertEqual(parsed["state"], "configured")
         self.assertEqual(parsed["details"]["bluetoothTarget"], "13d3:3558")
         self.assertEqual(
@@ -139,11 +140,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             stderr="",
         )
 
-        parsed = self.plugin._parse_setup_result("verify", result)
+        parsed = self.plugin._parse_setup_result("verify", "cec", result)
 
         self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["component"], "cec")
         self.assertEqual(parsed["state"], "needs_setup")
-        self.assertEqual(parsed["summary"], "Sleep/wake setup is not installed yet.")
+        self.assertEqual(parsed["summary"], "CEC sleep/wake setup is not installed yet.")
 
     def test_parse_setup_result_needs_repair(self):
         result = mote_main.CommandResult(
@@ -165,10 +167,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             stderr="",
         )
 
-        parsed = self.plugin._parse_setup_result("verify", result)
+        parsed = self.plugin._parse_setup_result("verify", "cec", result)
 
+        self.assertEqual(parsed["component"], "cec")
         self.assertEqual(parsed["state"], "needs_repair")
-        self.assertEqual(parsed["summary"], "Sleep/wake setup exists but needs repair.")
+        self.assertEqual(parsed["summary"], "CEC sleep/wake setup exists but needs repair.")
 
     def test_get_setup_script_path_uses_bundled_asset(self):
         script_path = self.plugin._get_setup_script_path()

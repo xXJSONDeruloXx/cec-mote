@@ -123,14 +123,23 @@ class Plugin:
     async def mute(self) -> dict:
         return await self._perform_action("mute")
 
-    async def get_sleep_wake_status(self) -> dict:
-        return await self._run_setup_mode("verify")
+    async def get_cec_setup_status(self) -> dict:
+        return await self._run_setup_mode("verify", "cec")
 
-    async def install_sleep_wake(self) -> dict:
-        return await self._run_setup_mode("install")
+    async def install_cec_setup(self) -> dict:
+        return await self._run_setup_mode("install", "cec")
 
-    async def uninstall_sleep_wake(self) -> dict:
-        return await self._run_setup_mode("uninstall")
+    async def uninstall_cec_setup(self) -> dict:
+        return await self._run_setup_mode("uninstall", "cec")
+
+    async def get_bluetooth_setup_status(self) -> dict:
+        return await self._run_setup_mode("verify", "bluetooth")
+
+    async def install_bluetooth_setup(self) -> dict:
+        return await self._run_setup_mode("install", "bluetooth")
+
+    async def uninstall_bluetooth_setup(self) -> dict:
+        return await self._run_setup_mode("uninstall", "bluetooth")
 
     def _ensure_action_lock(self) -> asyncio.Lock:
         if self._action_lock is None:
@@ -405,22 +414,31 @@ class Plugin:
             error_message="D-Bus method failure or CEC transmission error",
         )
 
-    async def _run_setup_mode(self, mode: str) -> dict[str, Any]:
+    async def _run_setup_mode(
+        self,
+        mode: str,
+        component: str,
+    ) -> dict[str, Any]:
         lock = self._ensure_action_lock()
         async with lock:
             script_path = self._get_setup_script_path()
-            args = (self._get_bash_path(), script_path, f"--{mode}")
+            args = (
+                self._get_bash_path(),
+                script_path,
+                f"--{mode}",
+                f"--{component}",
+            )
             if mode == "install":
                 args = (*args, "--yes")
 
             result = await self._run_command(
                 args,
                 env=self._setup_env(),
-                error_message=f"Setup script failed during {mode}",
+                error_message=f"Setup script failed during {mode} ({component})",
                 timeout_seconds=SETUP_COMMAND_TIMEOUT_SECONDS,
                 check_returncode=False,
             )
-            return self._parse_setup_result(mode, result)
+            return self._parse_setup_result(mode, component, result)
 
     async def _run_session_command(
         self,
@@ -493,7 +511,12 @@ class Plugin:
             env.pop(key, None)
         return env
 
-    def _parse_setup_result(self, mode: str, result: CommandResult) -> dict[str, Any]:
+    def _parse_setup_result(
+        self,
+        mode: str,
+        component: str,
+        result: CommandResult,
+    ) -> dict[str, Any]:
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
         combined_output = "\n".join(
@@ -502,15 +525,34 @@ class Plugin:
         lines = [line.strip() for line in combined_output.splitlines() if line.strip()]
 
         ok_lines = [line for line in lines if line.startswith("OK")]
-        warn_lines = [line for line in lines if line.startswith("WARN") or line.startswith("Warning:")]
-        fail_lines = [line for line in lines if line.startswith("FAIL") or line.startswith("Error:")]
+        warn_lines = [
+            line
+            for line in lines
+            if line.startswith("WARN") or line.startswith("Warning:")
+        ]
+        fail_lines = [
+            line for line in lines if line.startswith("FAIL") or line.startswith("Error:")
+        ]
 
-        state = self._classify_setup_state(result.returncode, ok_lines, fail_lines, warn_lines)
-        summary = self._summarize_setup_state(mode, state, result.returncode, lines)
+        state = self._classify_setup_state(
+            result.returncode,
+            ok_lines,
+            fail_lines,
+            warn_lines,
+        )
+        summary = self._summarize_setup_state(
+            mode,
+            component,
+            state,
+            result.returncode,
+            lines,
+        )
 
         details = {
             "stateFile": self._extract_value(lines, "State file loaded:"),
-            "cecPhysicalAddress": self._extract_value(lines, "Stored CEC physical address:"),
+            "cecPhysicalAddress": self._extract_value(
+                lines, "Stored CEC physical address:"
+            ),
             "cecDevice": self._extract_value(lines, "Stored CEC device:"),
             "cecObjectPath": self._extract_value(lines, "CEC D-Bus path:"),
             "bluetoothTarget": self._extract_value(
@@ -518,13 +560,16 @@ class Plugin:
             )
             or self._extract_value(lines, "Stored Bluetooth wake target:"),
             "bluetoothHelper": self._extract_value(lines, "bt-wakeup helper path:"),
-            "keepListPath": self._extract_value(lines, "Atomic-update keep-list exists:"),
+            "keepListPath": self._extract_value(
+                lines, "Atomic-update keep-list exists:"
+            ),
             "persistentLayout": self._extract_value(lines, "Persistent layout:"),
         }
 
         return {
             "ok": result.returncode == 0,
             "action": mode,
+            "component": component,
             "state": state,
             "summary": summary,
             "warnings": warn_lines,
@@ -570,6 +615,7 @@ class Plugin:
                 "Atomic-update keep-list missing",
                 "State file missing",
                 "unit missing",
+                "Bluetooth udev rule missing",
             )
         ) and not ok_lines:
             return "needs_setup"
@@ -580,27 +626,37 @@ class Plugin:
     def _summarize_setup_state(
         self,
         mode: str,
+        component: str,
         state: str,
         returncode: int,
         lines: list[str],
     ) -> str:
+        component_label = self._setup_component_label(component)
         if mode == "install":
             if returncode == 0:
-                return "Sleep/wake setup is installed and verified."
-            return "Sleep/wake setup install reported problems."
+                return f"{component_label} setup is installed and verified."
+            return f"{component_label} setup install reported problems."
         if mode == "uninstall":
             if returncode == 0:
-                return "Sleep/wake setup removed."
-            return "Sleep/wake setup uninstall reported problems."
+                return f"{component_label} setup removed."
+            return f"{component_label} setup uninstall reported problems."
         if state == "configured":
-            return "Sleep/wake setup is installed and healthy."
+            return f"{component_label} setup is installed and healthy."
         if state == "needs_setup":
-            return "Sleep/wake setup is not installed yet."
+            return f"{component_label} setup is not installed yet."
         if state == "needs_repair":
-            return "Sleep/wake setup exists but needs repair."
+            return f"{component_label} setup exists but needs repair."
         if lines:
             return lines[-1]
-        return "Sleep/wake setup status is unavailable."
+        return f"{component_label} setup status is unavailable."
+
+    @staticmethod
+    def _setup_component_label(component: str) -> str:
+        if component == "cec":
+            return "CEC sleep/wake"
+        if component == "bluetooth":
+            return "Bluetooth wake"
+        return "Sleep/wake"
 
     @staticmethod
     def _extract_value(lines: list[str], prefix: str) -> str | None:
