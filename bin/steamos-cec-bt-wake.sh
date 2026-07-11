@@ -5,7 +5,7 @@ SCRIPT_NAME="$(basename "$0")"
 MODE="install"
 COMPONENT="all"
 YES=0
-EXPECTED_CONFIG_VERSION=3
+EXPECTED_CONFIG_VERSION=4
 
 CEC_DEVICE="${CEC_DEVICE:-/dev/cec0}"
 CEC_DEST="com.steampowered.CecDaemon1"
@@ -20,6 +20,8 @@ STATE_FILE="$VAR_LIB_DIR/state.conf"
 LEGACY_STATE_FILE="/etc/steamos-cec-bt-wake.conf"
 CEC_SLEEP_SERVICE="/etc/systemd/system/cec-sleep.service"
 CEC_WAKE_SERVICE="/etc/systemd/system/cec-wake.service"
+CEC_SHUTDOWN_SERVICE="/etc/systemd/system/cec-shutdown.service"
+CEC_STARTUP_SERVICE="/etc/systemd/system/cec-startup.service"
 BT_WAKE_SERVICE="/etc/systemd/system/bt-wakeup.service"
 BT_WAKE_RULE="/etc/udev/rules.d/91-bluetooth-wakeup.rules"
 CEC_HELPER="$VAR_LIB_DIR/cec-control"
@@ -411,6 +413,8 @@ atomic_keep_paths() {
 /etc/steamos-cec-bt-wake/**
 /etc/systemd/system/cec-sleep.service
 /etc/systemd/system/cec-wake.service
+/etc/systemd/system/cec-shutdown.service
+/etc/systemd/system/cec-startup.service
 /etc/systemd/system/bt-wakeup.service
 /etc/udev/rules.d/91-bluetooth-wakeup.rules
 /etc/udev/rules.d/99-btusb-mediatek.rules
@@ -425,6 +429,8 @@ atomic_keep_paths_for_component() {
       cat <<EOF2
 /etc/systemd/system/cec-sleep.service
 /etc/systemd/system/cec-wake.service
+/etc/systemd/system/cec-shutdown.service
+/etc/systemd/system/cec-startup.service
 /etc/atomic-update.conf.d/steamos-cec-bt-wake.conf
 EOF2
       ;;
@@ -520,15 +526,19 @@ call_cec() {
 }
 
 main() {
-  restart_cecd
-  wait_for_cecd_object || true
-
   case "\$ACTION" in
     standby)
+      restart_cecd
+      wait_for_cecd_object || true
       sleep 2
       call_cec Standby 0 || warn "Standby command failed"
       ;;
+    shutdown)
+      call_cec Standby 0 || warn "Standby command failed during shutdown"
+      ;;
     wake)
+      restart_cecd
+      wait_for_cecd_object || true
       if [[ -z "\$ACTIVE_SOURCE" ]]; then
         warn "Wake requested without an active-source argument"
         exit 0
@@ -557,7 +567,7 @@ install_cec() {
   ensure_var_layout
   install_cec_helper
 
-  log "Writing CEC sleep and wake services"
+  log "Writing CEC sleep, resume, startup, and shutdown services"
   cat <<EOF2 | write_file "$CEC_SLEEP_SERVICE" 0644
 [Unit]
 Description=CEC TV Standby on Sleep
@@ -589,6 +599,40 @@ ExecStart=$CEC_HELPER wake $physical_int
 
 [Install]
 WantedBy=suspend.target
+EOF2
+
+  cat <<EOF2 | write_file "$CEC_SHUTDOWN_SERVICE" 0644
+[Unit]
+Description=CEC TV Standby on Shutdown
+DefaultDependencies=no
+Before=shutdown.target systemd-user-sessions.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+User=$desktop_user
+Environment=XDG_RUNTIME_DIR=/run/user/$desktop_uid
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$desktop_uid/bus
+ExecStart=$CEC_HELPER shutdown
+
+[Install]
+WantedBy=halt.target poweroff.target reboot.target
+EOF2
+
+  cat <<EOF2 | write_file "$CEC_STARTUP_SERVICE" 0644
+[Unit]
+Description=CEC TV Wake on Startup
+After=graphical.target
+
+[Service]
+Type=oneshot
+User=$desktop_user
+Environment=XDG_RUNTIME_DIR=/run/user/$desktop_uid
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$desktop_uid/bus
+ExecStart=$CEC_HELPER wake $physical_int
+
+[Install]
+WantedBy=multi-user.target
 EOF2
 
   cat <<EOF2 | write_file "$CEC_STATE_FILE" 0644
@@ -1021,13 +1065,13 @@ verify_atomic_keep_list() {
 
   case "$component" in
     cec)
-      installed_paths=("$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$ATOMIC_UPDATE_KEEP_FILE")
+      installed_paths=("$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_SHUTDOWN_SERVICE" "$CEC_STARTUP_SERVICE" "$ATOMIC_UPDATE_KEEP_FILE")
       ;;
     bluetooth)
       installed_paths=("$BT_WAKE_SERVICE" "$BT_WAKE_RULE" "$MTK_RULE" "$ATOMIC_UPDATE_KEEP_FILE")
       ;;
     *)
-      installed_paths=("$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$BT_WAKE_SERVICE" "$BT_WAKE_RULE" "$MTK_RULE" "$ATOMIC_UPDATE_KEEP_FILE")
+      installed_paths=("$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_SHUTDOWN_SERVICE" "$CEC_STARTUP_SERVICE" "$BT_WAKE_SERVICE" "$BT_WAKE_RULE" "$MTK_RULE" "$ATOMIC_UPDATE_KEEP_FILE")
       ;;
   esac
 
@@ -1068,6 +1112,8 @@ report_holo_sync_var_status() {
   local project_paths=(
     "$CEC_SLEEP_SERVICE"
     "$CEC_WAKE_SERVICE"
+    "$CEC_SHUTDOWN_SERVICE"
+    "$CEC_STARTUP_SERVICE"
     "$BT_WAKE_SERVICE"
     "$BT_WAKE_RULE"
     "$MTK_RULE"
@@ -1109,7 +1155,7 @@ report_holo_sync_var_status() {
 
 cec_files_exist() {
   local path
-  for path in "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_HELPER" "$CEC_STATE_FILE" "$LEGACY_CEC_HELPER" "$STATE_FILE" "$LEGACY_STATE_FILE"; do
+  for path in "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_SHUTDOWN_SERVICE" "$CEC_STARTUP_SERVICE" "$CEC_HELPER" "$CEC_STATE_FILE" "$LEGACY_CEC_HELPER" "$STATE_FILE" "$LEGACY_STATE_FILE"; do
     [[ -e "$path" ]] && return 0
   done
   return 1
@@ -1185,6 +1231,16 @@ verify_cec() {
   (( service_rc > 0 )) && partial_damage=1
 
   report_service_installed cec-wake.service "$CEC_WAKE_SERVICE"
+  service_rc=$?
+  failures=$((failures + service_rc))
+  (( service_rc > 0 )) && partial_damage=1
+
+  report_service_installed cec-shutdown.service "$CEC_SHUTDOWN_SERVICE"
+  service_rc=$?
+  failures=$((failures + service_rc))
+  (( service_rc > 0 )) && partial_damage=1
+
+  report_service_installed cec-startup.service "$CEC_STARTUP_SERVICE"
   service_rc=$?
   failures=$((failures + service_rc))
   (( service_rc > 0 )) && partial_damage=1
@@ -1298,11 +1354,11 @@ verify() {
 }
 
 uninstall_cec_setup() {
-  log "Disabling CEC sleep/wake services"
-  systemctl disable --now cec-sleep.service cec-wake.service 2>/dev/null || true
-  rm -f "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_HELPER" "$CEC_STATE_FILE" "$LEGACY_CEC_HELPER"
+  log "Disabling CEC sleep, startup, and shutdown services"
+  systemctl disable --now cec-sleep.service cec-wake.service cec-shutdown.service cec-startup.service 2>/dev/null || true
+  rm -f "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_SHUTDOWN_SERVICE" "$CEC_STARTUP_SERVICE" "$CEC_HELPER" "$CEC_STATE_FILE" "$LEGACY_CEC_HELPER"
   refresh_managed_layout
-  log "Removed CEC sleep/wake configuration installed by this script"
+  log "Removed CEC sleep, startup, and shutdown configuration installed by this script"
 }
 
 uninstall_bluetooth_setup() {
@@ -1315,8 +1371,8 @@ uninstall_bluetooth_setup() {
 
 uninstall_all() {
   log "Disabling installed services"
-  systemctl disable --now cec-sleep.service cec-wake.service bt-wakeup.service 2>/dev/null || true
-  rm -f "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$BT_WAKE_SERVICE" \
+  systemctl disable --now cec-sleep.service cec-wake.service cec-shutdown.service cec-startup.service bt-wakeup.service 2>/dev/null || true
+  rm -f "$CEC_SLEEP_SERVICE" "$CEC_WAKE_SERVICE" "$CEC_SHUTDOWN_SERVICE" "$CEC_STARTUP_SERVICE" "$BT_WAKE_SERVICE" \
     "$BT_WAKE_RULE" "$MTK_RULE" "$CEC_STATE_FILE" "$BT_STATE_FILE" "$STATE_FILE" "$LEGACY_STATE_FILE" \
     "$CEC_HELPER" "$BT_HELPER" "$LEGACY_CEC_HELPER" "$LEGACY_BT_HELPER"
   refresh_managed_layout
@@ -1355,7 +1411,7 @@ SUMMARY
   systemctl daemon-reload
   udevadm control --reload-rules
 
-  systemctl enable cec-sleep.service cec-wake.service
+  systemctl enable cec-sleep.service cec-wake.service cec-shutdown.service cec-startup.service
 
   log "CEC installation complete"
   if ! verify_cec; then
@@ -1475,7 +1531,7 @@ SUMMARY
   udevadm control --reload-rules
   udevadm trigger --subsystem-match=usb --action=add || true
 
-  systemctl enable cec-sleep.service cec-wake.service bt-wakeup.service
+  systemctl enable cec-sleep.service cec-wake.service cec-shutdown.service cec-startup.service bt-wakeup.service
   systemctl restart bt-wakeup.service
 
   log "Installation complete"
@@ -1490,6 +1546,7 @@ Test from Game Mode after a full reboot:
   1. Put the PC to sleep and confirm the TV enters standby.
   2. Wake with a Bluetooth controller, keyboard, or mouse.
   3. Confirm the TV powers on and switches to the correct HDMI input.
+  4. Shut down and start the PC, then confirm the TV enters standby and wakes again.
 
 Useful commands:
   sudo ./steamos-cec-bt-wake.sh --verify

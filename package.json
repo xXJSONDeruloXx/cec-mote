@@ -1,6 +1,6 @@
 {
   "name": "cec-mote",
-  "version": "0.3.2",
+  "version": "0.3.3-pre.1",
   "description": "A minimal HDMI-CEC remote and SteamOS sleep/wake setup assistant for Decky Loader.",
   "type": "module",
   "scripts": {
