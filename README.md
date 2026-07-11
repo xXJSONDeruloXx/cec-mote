@@ -5,6 +5,6 @@
 `cec-mote` is a Decky Loader plugin for SteamOS that:
 
 - sends HDMI-CEC volume commands through the built-in `cecd` D-Bus service
-- assists with installing, repairing, verifying, and uninstalling services to sleep tv on system sleep, and turn on / change input of tv on system wake, specifically when paired with active DP to HDMI adaptors such as the UGREEN 8k DP to HDMI Adaptor. Additionally it auto discovers bluetooth dongles and enables them as bluetooth wake targets
+- assists with installing, repairing, verifying, and uninstalling services to put the TV in standby when the PC sleeps or shuts down, and to turn it on / change input when the PC resumes or starts. It is designed for active DP-to-HDMI adaptors such as the UGREEN 8K DP-to-HDMI adaptor, and also discovers Bluetooth dongles and enables them as wake targets.
 
 The plugin does not talk to the CEC adapter directly. It uses `cecd` as the sole controller and sends only the validated high-level D-Bus methods exposed by `com.steampowered.CecDaemon1.CecDevice1`.
